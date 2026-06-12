@@ -41,7 +41,7 @@
   <div id="app">
     <div class="bcm-bootstrap-loader"><span class="pulse"></span>plotting belief field&hellip;</div>
   </div>
-  <a href="belief-explorer.html" title="Open the tabulated belief database" style="position:fixed;left:18px;bottom:18px;z-index:50;font:11px 'JetBrains Mono',ui-monospace,monospace;letter-spacing:.04em;color:#7d8db3;text-decoration:none;padding:9px 13px;background:rgba(8,13,28,0.78);border:1px solid rgba(127,217,255,0.18);border-radius:10px;backdrop-filter:blur(14px)">&#9638; Belief database</a>
+  <a href="belief-explorer.html" style="position:fixed;left:18px;bottom:18px;z-index:50;font:11px 'JetBrains Mono',ui-monospace,monospace;letter-spacing:.04em;color:#7d8db3;text-decoration:none;padding:9px 13px;background:rgba(8,13,28,0.78);border:1px solid rgba(127,217,255,0.18);border-radius:10px;backdrop-filter:blur(14px)">&#9638; Belief database</a>
 
   <!-- Belief corpus: classic script so window.* globals are set before the module runs. -->
   <script src="data/beliefs-map-db.js"></script>
@@ -1539,7 +1539,7 @@ function cssRgba(c, a) {
 
 
 
-function startBeliefMap({ container, theme, sectors, clusters, beliefs, links, buildUI: customBuildUI, subject }) {
+function startBeliefMap({ container, theme, sectors, clusters, beliefs, links, buildUI: customBuildUI, subject, sources }) {
   // ─── Schema normalization ────────────────────────────────────────
   // Supports both:
   //   single-person: conviction, evidence_strength, frequency, emphasis_markers, sources, rationale
@@ -1614,7 +1614,7 @@ function startBeliefMap({ container, theme, sectors, clusters, beliefs, links, b
     blog:      0xff6f9c, // pink
     other:     0x9aa7c7, // slate-gray
   };
-  const SRC = (typeof window !== 'undefined' && window.SOURCES) || {};
+  const SRC = sources || (typeof window !== 'undefined' && window.SOURCES) || {};
   function categoryOf(sid) {
     const s = SRC[sid] || {};
     const v = (s.venue || '').toLowerCase();
@@ -2286,6 +2286,7 @@ function startBeliefMap({ container, theme, sectors, clusters, beliefs, links, b
       r.halo.material.opacity = (isHover ? 1.0 : r.baseHaloOpacity) * dim;
     });
     refreshLinkAlphas();
+    applyHighlight(); // an active comparison highlight wins over hover dimming
     ui.setTooltip(id ? beliefById.get(id) : null);
   }
 
@@ -2307,6 +2308,7 @@ function startBeliefMap({ container, theme, sectors, clusters, beliefs, links, b
       r.halo.material.opacity = r.baseHaloOpacity * (inFocus ? 1 : 0.2);
     });
     refreshLinkAlphas();
+    applyHighlight(); // an active comparison highlight wins over selection dimming
   }
 
   function flyTo(targetPos) {
@@ -2457,9 +2459,10 @@ function startBeliefMap({ container, theme, sectors, clusters, beliefs, links, b
         const ap = r.appear < 1 ? (r.appear * r.appear * (3 - 2 * r.appear)) : 1; // smoothstep
         // breathing scale
         const breath = 1 + 0.04 * Math.sin(t * (0.7 + r.belief.popularity) + r.basePos.x * 0.01);
-        r.mesh.scale.setScalar(Math.max(0.001, breath * ap));
+        const hl = r._hlScale || 1; // comparison-highlight boost (setHighlight)
+        r.mesh.scale.setScalar(Math.max(0.001, breath * ap * hl));
         r.halo.scale.setScalar(r.baseHaloScale * breath * ap);
-        if (r.edgeLines) r.edgeLines.scale.setScalar(Math.max(0.001, ap));
+        if (r.edgeLines) r.edgeLines.scale.setScalar(Math.max(0.001, ap * hl));
         // Gentle tumble; keep wireframe shell aligned to its core
         r.mesh.rotation.y += dt * 0.08 * (0.6 + r.belief.popularity * 0.4);
         if (r.edgeLines) r.edgeLines.rotation.copy(r.mesh.rotation);
@@ -2523,9 +2526,94 @@ function startBeliefMap({ container, theme, sectors, clusters, beliefs, links, b
     }
   }
 
+  // ─── Comparison highlight (additive API; used by the Convergence Comparator) ──
+  // setHighlight(ids, hex): the given node ids glow in `hex`, scale up, and render
+  // x-ray (visible through the cluster); everything else dims, links fade.
+  // clearHighlight() restores the untouched-map state exactly.
+  const highlight = { ids: null, color: 0xffffff };
+  function _saveMatState(r) {
+    if (r._matSaved) return;
+    r._matSaved = {
+      transparent: r.mesh.material.transparent,
+      opacity: r.mesh.material.opacity,
+      depthTest: r.mesh.material.depthTest,
+      edgeOpacity: r.edgeLines ? r.edgeLines.material.opacity : null,
+      edgeDepthTest: r.edgeLines ? r.edgeLines.material.depthTest : null,
+    };
+  }
+  function applyHighlight() {
+    if (!highlight.ids) return;
+    const ids = highlight.ids;
+    nodeRecords.forEach(r => {
+      _saveMatState(r);
+      const isM = ids.has(r.id);
+      const m = r.mesh.material;
+      m.transparent = true;
+      m.opacity = isM ? Math.max(0.92, r._matSaved.opacity) : Math.min(r._matSaved.opacity, 1) * 0.10;
+      m.depthTest = !isM;
+      m.needsUpdate = true;
+      r.mesh.renderOrder = isM ? 10 : 0;
+      m.emissive.copy(isM ? new THREE.Color(highlight.color) : r.color);
+      m.emissiveIntensity = isM ? 1.15 : r.baseEmissive * 0.25;
+      r.halo.material.opacity = isM ? r.baseHaloOpacity : 0;
+      if (r.edgeLines) {
+        const em = r.edgeLines.material;
+        em.opacity = isM ? Math.max(0.85, r._matSaved.edgeOpacity ?? 0) : (r._matSaved.edgeOpacity ?? 0) * 0.08;
+        em.depthTest = !isM;
+        em.color.copy(isM ? new THREE.Color(highlight.color) : r.color);
+        r.edgeLines.renderOrder = isM ? 11 : 0;
+      }
+      r._hlScale = isM ? 1.5 : 1;
+    });
+    Object.values(typeLines).forEach(tl => { tl.mat.uniforms.uGlobal.value = 0.15; });
+  }
+  function setHighlight(ids, colorHex) {
+    if (!ids || !ids.length) { clearHighlight(); return; }
+    highlight.ids = new Set(ids);
+    highlight.color = colorHex ?? 0xffffff;
+    applyHighlight();
+  }
+  function clearHighlight() {
+    if (!highlight.ids) return;
+    highlight.ids = null;
+    nodeRecords.forEach(r => {
+      if (!r._matSaved) return;
+      const m = r.mesh.material;
+      m.transparent = r._matSaved.transparent;
+      m.opacity = r._matSaved.opacity;
+      m.depthTest = r._matSaved.depthTest;
+      m.needsUpdate = true;
+      r.mesh.renderOrder = 0;
+      m.emissive.copy(r.color);
+      m.emissiveIntensity = r.baseEmissive;
+      r.halo.material.opacity = r.baseHaloOpacity;
+      if (r.edgeLines) {
+        const em = r.edgeLines.material;
+        em.opacity = r._matSaved.edgeOpacity ?? em.opacity;
+        em.depthTest = r._matSaved.edgeDepthTest ?? true;
+        em.color.copy(r.color);
+        r.edgeLines.renderOrder = 0;
+      }
+      r._hlScale = 1;
+    });
+    Object.values(typeLines).forEach(tl => { tl.mat.uniforms.uGlobal.value = 1.0; });
+  }
+  // Screen-space position of a node (CSS px within the container), or null if
+  // behind the camera / hidden. For external label layers.
+  function projectNode(id) {
+    const r = nodeById.get(id);
+    if (!r || !r.group.visible) return null;
+    const v = r.mesh.getWorldPosition(new THREE.Vector3()).project(camera);
+    if (v.z > 1) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    return { x: (v.x + 1) / 2 * rect.width, y: (-v.y + 1) / 2 * rect.height };
+  }
+
   // ─── Public API ─────────────────────────────────────────────────
   return {
     selectNode, hoverNode, resetCamera, startPropagation,
+    setHighlight, clearHighlight, projectNode,
+    camera, controls,
     setAutoRotate: v => { controls.autoRotate = v; },
     setDrift: v => { state.drift = v; },
     destroy: () => {
